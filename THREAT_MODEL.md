@@ -51,7 +51,10 @@ memory.
 - *Server impersonation (MITM).* **Mitigation:** TLS certificate verification is
   **on by default** (`verify=True`) and cannot be disabled by accident. Disabling
   it is possible only via an explicit constructor argument, documented as
-  production-unsafe.
+  production-unsafe. Relatedly, an `http://` `base_url` (which would send the API
+  key in plaintext) is **refused** while verification is enabled, so TLS cannot
+  be dropped by a stray scheme either; `verify=False` is the explicit, test-only
+  opt-out.
 
 ### Tampering
 - *In-flight modification.* Mitigated by mandatory TLS for both directions.
@@ -78,17 +81,27 @@ memory.
   `max_bytes` ceiling (default 16 MiB, generous enough for v4 media) to bound
   memory; set it lower if your transport does not already cap body size.
 - *Algorithmic/parse abuse.* Parsing is plain `json.loads` (no `eval`, no
-  regex backtracking on untrusted input) plus linear field extraction — O(n) in
-  payload size.
+  regex backtracking on untrusted input) plus linear field extraction. Three
+  edge cases are handled so a hostile body fails cleanly rather than crashing
+  the receiver: deeply nested JSON (which would exhaust the decoder's stack) is
+  caught and re-raised as `ParseError`; a numeric *string* is converted to an
+  `int` only when it is short enough to keep the conversion cheap (mirroring
+  CPython's own `int`-string limit, so behaviour is uniform on Python < 3.11);
+  and an out-of-range epoch timestamp coerces to `None` on access instead of
+  raising `OverflowError`.
 - *Unbounded retries / cost amplification.* The client's retries are **bounded**
   (`max_retries`, default 3) with deterministic, capped back-off; a server
   `Retry-After` is honoured but capped (`retry_after_max`, default 60 s) so a
   hostile/buggy header cannot stall the caller indefinitely.
-- *Accidental double-spend.* Non-idempotent POSTs (which send paid commands) are
-  **never replayed** on ambiguous failures (read timeouts, 5xx). Only failures
-  that prove the request was *not* processed (connection errors) or *not*
-  accepted (HTTP 429) are retried. This is the single most important reliability
-  decision in the codebase and is enforced in `InboundClient._request`.
+- *Accidental double-spend.* A request that has a **side effect** (sends a paid
+  command) is **never replayed** on ambiguous failures (read timeouts, 5xx).
+  Only failures that prove the request was *not* processed (connection errors)
+  or *not* accepted (HTTP 429) are retried. This applies to every paid command
+  regardless of HTTP method: it covers the non-idempotent POSTs *and*
+  `request_location`, which is a GET but triggers a billable locate (it is sent
+  with `idempotent=False` so the read-only-GET retry path cannot replay it).
+  This is the single most important reliability decision in the codebase and is
+  enforced in `InboundClient._request`.
 
 ### Elevation of privilege
 - The library holds no ambient authority; it acts only with the credentials the

@@ -28,7 +28,7 @@ from ._version import __version__
 from .auth import ApiKeyAuth, BasicAuth
 from .constants import BinaryType
 from .dates import to_iso8601
-from .exceptions import ParseError, TransportError, response_error_for
+from .exceptions import ConfigurationError, ParseError, TransportError, response_error_for
 from .models import BinaryMessage, MediaMessage, Message, ReferencePoint, TrackingDevice
 from .validation import validate_imei, validate_imeis, validate_message, validate_timestamp
 
@@ -53,8 +53,10 @@ _PATH_EMER_STATE = "/api/Emergency/State"
 _PATH_EMER_ACK = "/api/Emergency/AcknowledgeDeclareEmergency"
 _PATH_EMER_SEND = "/api/Emergency/SendMessage"
 
-# Status codes for which a *GET* (idempotent) may safely be retried.
-_RETRYABLE_GET_STATUS = frozenset({500, 502, 503, 504})
+# Status codes for which a side-effect-free (idempotent) request may safely be
+# retried. A request with a side effect is never replayed on these, because the
+# server may already have processed it.
+_RETRYABLE_IDEMPOTENT_STATUS = frozenset({500, 502, 503, 504})
 
 
 class InboundClient:
@@ -92,7 +94,18 @@ class InboundClient:
     ):
         if max_retries < 0:
             raise ValueError("max_retries must be >= 0")
-        self._base_url = base_url.rstrip("/")
+        normalized = base_url.rstrip("/")
+        # Refuse to send credentials over plaintext. Only meaningful when a real
+        # network transport is used (an injected transport -- e.g. a test mock --
+        # never touches the wire); verify=False is the explicit opt-out for
+        # local, non-production testing.
+        if transport is None and verify and not normalized.lower().startswith("https://"):
+            raise ConfigurationError(
+                f"base_url must use https:// (got {base_url!r}); the API key would "
+                "otherwise be sent in plaintext. Pass verify=False only for local, "
+                "non-production testing."
+            )
+        self._base_url = normalized
         self._max_retries = max_retries
         self._backoff_factor = backoff_factor
         self._backoff_max = backoff_max
@@ -202,9 +215,20 @@ class InboundClient:
     # -- location ----------------------------------------------------------
 
     def request_location(self, imeis: Iterable[str]) -> Any:
-        """Request a fresh location (sends a locate command; incurs cost)."""
+        """Request a fresh location (sends a locate command; incurs cost).
 
-        return self._json(self._request("GET", _PATH_LOC_REQUEST, params=self._imei_param(imeis)))
+        Although this is an HTTP GET, it has a *billable* side effect, so it is
+        treated as non-idempotent: it is never replayed after an ambiguous
+        failure (a read timeout or a 5xx), only after a failure that proves the
+        command never reached the server (a connection error). This prevents a
+        single transient glitch from spending twice.
+        """
+
+        return self._json(
+            self._request(
+                "GET", _PATH_LOC_REQUEST, params=self._imei_param(imeis), idempotent=False
+            )
+        )
 
     def last_known_location(self, imeis: Iterable[str]) -> Any:
         """Query the last known location (no command sent; no cost)."""
@@ -324,9 +348,19 @@ class InboundClient:
         *,
         params: Mapping[str, str] | None = None,
         json: Any = None,
+        idempotent: bool | None = None,
     ) -> httpx.Response:
         url = self._base_url + path
         is_get = method == "GET"
+        # Whether this request may be safely re-sent after an *ambiguous*
+        # failure -- one where the server may already have acted on it (a read
+        # timeout, or a 5xx). GETs are assumed side-effect-free unless the
+        # caller says otherwise; a GET that triggers a paid device command
+        # (e.g. LocationRequest) passes idempotent=False so it is never silently
+        # replayed and double-charged. Connection errors and 429s are handled
+        # separately below: those prove the request was not processed, so they
+        # are retried regardless of idempotency.
+        retry_ambiguous = is_get if idempotent is None else idempotent
         attempt = 0
         while True:
             attempt += 1
@@ -341,8 +375,8 @@ class InboundClient:
                 raise TransportError(f"could not connect to {url}: {exc}") from exc
             except httpx.TransportError as exc:
                 # Ambiguous failure (e.g. read timeout): the server may already
-                # have acted on the request. Only retry idempotent GETs.
-                if is_get and attempt <= self._max_retries:
+                # have acted on the request. Only retry side-effect-free calls.
+                if retry_ambiguous and attempt <= self._max_retries:
                     self._sleep(self._backoff(attempt))
                     continue
                 raise TransportError(f"transport error for {url}: {exc}") from exc
@@ -350,8 +384,8 @@ class InboundClient:
             if response.status_code == 429 and attempt <= self._max_retries:
                 self._sleep(self._retry_after(response, attempt))
                 continue
-            retryable_get = is_get and response.status_code in _RETRYABLE_GET_STATUS
-            if retryable_get and attempt <= self._max_retries:
+            retryable = retry_ambiguous and response.status_code in _RETRYABLE_IDEMPOTENT_STATUS
+            if retryable and attempt <= self._max_retries:
                 self._sleep(self._backoff(attempt))
                 continue
 

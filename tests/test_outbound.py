@@ -175,3 +175,43 @@ def test_bad_base64_media_raises() -> None:
     event = parse_events(payload)[0]
     with pytest.raises(ParseError):
         event.decoded_media()
+
+
+# --- Hostile / malformed payloads must fail cleanly, never crash the receiver ---
+
+
+def test_deeply_nested_payload_raises_parse_error() -> None:
+    # A deeply nested array exhausts the JSON decoder's stack; it must surface
+    # as ParseError, not an uncaught RecursionError, so a webhook handler that
+    # only guards ParseError is not crashed.
+    with pytest.raises(ParseError):
+        parse_events('{"Version":"2.0","Events":' + "[" * 60000)
+
+
+def test_out_of_range_timestamp_becomes_none() -> None:
+    # A timestamp outside datetime's representable range must yield None when
+    # read, not raise OverflowError in the consumer's request handler.
+    payload = (
+        '{"Version":"2.0","Events":[{"imei":"1","messageCode":65,'
+        '"timeStamp":99999999999999999999,'
+        '"pingbackReceived":-99999999999999999999,'
+        '"pingbackResponded":99999999999999999999}]}'
+    )
+    event = parse_events(payload)[0]
+    assert event.timestamp_ms == 99999999999999999999  # preserved losslessly
+    assert event.timestamp is None
+    assert event.pingback_received is None
+    assert event.pingback_responded is None
+
+
+def test_oversized_numeric_string_is_bounded() -> None:
+    big = "9" * 100000
+    # In a required field it is rejected, and the error must not embed the blob.
+    with pytest.raises(ParseError) as exc:
+        parse_events('{"Version":"2.0","Events":[{"imei":"1","messageCode":"' + big + '"}]}')
+    assert len(str(exc.value)) < 200
+    # In an optional field it coerces to None rather than being converted.
+    event = parse_events(
+        '{"Version":"2.0","Events":[{"imei":"1","messageCode":3,"timeStamp":"' + big + '"}]}'
+    )[0]
+    assert event.timestamp_ms is None
