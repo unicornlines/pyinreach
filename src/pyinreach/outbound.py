@@ -152,21 +152,17 @@ class Event:
 
     @property
     def timestamp(self) -> datetime | None:
-        """Event creation time as a UTC datetime."""
+        """Event creation time as a UTC datetime (``None`` if out of range)."""
 
-        return None if self.timestamp_ms is None else from_epoch_ms(self.timestamp_ms)
+        return _safe_from_epoch_ms(self.timestamp_ms)
 
     @property
     def pingback_received(self) -> datetime | None:
-        if self.pingback_received_ms is None:
-            return None
-        return from_epoch_ms(self.pingback_received_ms)
+        return _safe_from_epoch_ms(self.pingback_received_ms)
 
     @property
     def pingback_responded(self) -> datetime | None:
-        if self.pingback_responded_ms is None:
-            return None
-        return from_epoch_ms(self.pingback_responded_ms)
+        return _safe_from_epoch_ms(self.pingback_responded_ms)
 
     def decoded_payload(self) -> bytes | None:
         """Decode the Base64 ``payload`` to bytes (``None`` if absent)."""
@@ -253,6 +249,11 @@ def _load(data: str | bytes | bytearray | Mapping[str, Any], max_bytes: int | No
         return json.loads(text)
     except (ValueError, UnicodeDecodeError) as exc:
         raise ParseError(f"payload is not valid JSON: {exc}") from exc
+    except RecursionError:
+        # Deeply nested JSON (e.g. "[[[[...") exhausts the decoder's stack.
+        # Surface it as a ParseError so a receiver that only guards against
+        # ParseError is not crashed by a hostile payload.
+        raise ParseError("payload nesting is too deep") from None
 
 
 def _parse_event(item: Any, index: int) -> Event:
@@ -334,7 +335,7 @@ def _opt_str(value: Any) -> str | None:
 def _coerce_int(value: Any, field: str) -> int:
     result = _coerce_int_opt(value)
     if result is None:
-        raise ParseError(f"{field} must be an integer, got {value!r}")
+        raise ParseError(f"{field} must be an integer, got {_brief(value)}")
     return result
 
 
@@ -346,8 +347,14 @@ def _coerce_int_opt(value: Any) -> int | None:
     if isinstance(value, float):
         return int(value) if value.is_integer() else None
     if isinstance(value, str):
+        stripped = value.strip()
+        # Bound the cost of int() on attacker-supplied text: converting a
+        # multi-megabyte run of digits is super-linear, and Python < 3.11 has
+        # no built-in cap. A legitimate field here is at most ~20 digits.
+        if len(stripped) > _MAX_INT_DIGITS:
+            return None
         try:
-            return int(value.strip())
+            return int(stripped)
         except ValueError:
             return None
     return None
@@ -375,3 +382,33 @@ def _decode_b64(value: str | None, field: str) -> bytes | None:
         return base64.b64decode(value, validate=True)
     except (binascii.Error, ValueError) as exc:
         raise ParseError(f"{field} is not valid Base64: {exc}") from exc
+
+
+def _safe_from_epoch_ms(milliseconds: int | None) -> datetime | None:
+    """Convert an epoch-ms value to UTC, or ``None`` if it is out of range.
+
+    A hostile or buggy payload can carry a millisecond count outside the range
+    a :class:`datetime` can represent. Returning ``None`` keeps reading a
+    derived timestamp from untrusted input from raising ``OverflowError`` in a
+    consumer's request handler.
+    """
+
+    if milliseconds is None:
+        return None
+    try:
+        return from_epoch_ms(milliseconds)
+    except (OverflowError, ValueError, OSError):
+        return None
+
+
+#: Maximum digit count accepted when coercing a numeric *string* to an int.
+#: Mirrors CPython's own default ``int``-string limit so behaviour is uniform
+#: across supported versions and the conversion stays cheap.
+_MAX_INT_DIGITS = 4300
+
+
+def _brief(value: object, limit: int = 80) -> str:
+    """``repr(value)`` truncated, so a huge hostile value can't bloat a message."""
+
+    text = repr(value)
+    return text if len(text) <= limit else f"{text[:limit]}... ({len(text)} chars)"

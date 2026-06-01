@@ -342,6 +342,51 @@ def test_read_timeout_is_retried_for_get(make_client, sleeps: list[float]) -> No
     assert calls["n"] == 2 and len(sleeps) == 1
 
 
+# request_location is a GET, but it triggers a *paid* device command, so unlike
+# the read-only GETs above it must never be replayed on an ambiguous failure.
+
+
+def test_request_location_not_replayed_on_read_timeout(make_client, sleeps: list[float]) -> None:  # type: ignore[no-untyped-def]
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        raise httpx.ReadTimeout("ambiguous: server may already have sent the locate")
+
+    with pytest.raises(TransportError):
+        make_client(handler).request_location(["100000000000001"])
+    assert calls["n"] == 1  # the paid command was not re-sent
+    assert sleeps == []
+
+
+def test_request_location_not_replayed_on_5xx(make_client, sleeps: list[float]) -> None:  # type: ignore[no-untyped-def]
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(503)
+
+    with pytest.raises(ServerError):
+        make_client(handler).request_location(["100000000000001"])
+    assert calls["n"] == 1
+    assert sleeps == []
+
+
+def test_request_location_retried_on_connect_error(make_client, sleeps: list[float]) -> None:  # type: ignore[no-untyped-def]
+    # A connection error proves the locate command never reached the server, so
+    # re-sending it cannot double-charge: that retry is still allowed.
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise httpx.ConnectError("refused")
+        return json_response({"ok": True})
+
+    make_client(handler).request_location(["100000000000001"])
+    assert calls["n"] == 2 and len(sleeps) == 1
+
+
 def test_location_history_accepts_string_dates(make_client) -> None:  # type: ignore[no-untyped-def]
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.params.get("Start") == "2024-01-01"
@@ -391,3 +436,13 @@ def test_context_manager_closes() -> None:
         transport=httpx.MockTransport(handler),
     ) as client:
         assert client.send_message(["100000000000001"], "t@e.com", "hi") == 1
+
+
+def test_plaintext_base_url_is_rejected() -> None:
+    """A real (un-mocked) http:// client would leak the API key in plaintext."""
+    from pyinreach import ApiKeyAuth, ConfigurationError, InboundClient
+
+    with pytest.raises(ConfigurationError):
+        InboundClient(auth=ApiKeyAuth("k"), base_url="http://ipcinbound.example")
+    # verify=False is the explicit opt-out for local, non-production testing.
+    InboundClient(auth=ApiKeyAuth("k"), base_url="http://localhost:8080", verify=False).close()

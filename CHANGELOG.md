@@ -6,6 +6,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- `request_location` is a GET but triggers a *paid* locate command, so it is no
+  longer treated as a side-effect-free GET: it is never replayed after an
+  ambiguous failure (read timeout or 5xx), closing a double-spend gap. It is
+  still retried after a connection error, which proves the command was not sent.
+
+### Security
+- `parse_events` now raises `ParseError` (instead of leaking an uncaught
+  `RecursionError`) on deeply nested JSON, so a hostile webhook body cannot
+  crash a receiver that only guards `ParseError`.
+- Reading `Event.timestamp` / `pingback_received` / `pingback_responded` from an
+  out-of-range epoch value now returns `None` instead of raising `OverflowError`
+  in the consumer's request handler.
+- Coercing a numeric *string* to an `int` during outbound parsing is now bounded
+  in length, preventing a super-linear `int()` conversion on a multi-megabyte
+  digit run (Python < 3.11 has no built-in cap). Oversized values are also
+  truncated in parse-error messages to avoid log amplification.
+- `InboundClient` now refuses a non-`https://` `base_url` while TLS verification
+  is enabled, so the API key cannot be sent in plaintext via a stray scheme.
+  Pass `verify=False` to opt out for local, non-production testing.
+
 ## [0.1.0]
 
 Initial release.
