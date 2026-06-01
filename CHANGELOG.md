@@ -7,6 +7,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Fixed
+- The `Event` and `EventBatch` `raw` fields used a `MappingProxyType` default,
+  which Python 3.11 rejects as a mutable dataclass default (the type is
+  unhashable there), making the package fail to import on 3.11. They now use a
+  `default_factory`, so import works across 3.10-3.13.
 - `request_location` is a GET but triggers a *paid* locate command, so it is no
   longer treated as a side-effect-free GET: it is never replayed after an
   ambiguous failure (read timeout or 5xx), closing a double-spend gap. It is

@@ -19,7 +19,7 @@ import binascii
 import json
 import math
 from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from numbers import Real
 from types import MappingProxyType
@@ -108,7 +108,7 @@ class Event:
     media_id: str | None = None
     media_type: str | None = None
     transcription: str | None = None
-    raw: Mapping[str, Any] = MappingProxyType({})
+    raw: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
 
     # -- derived views -----------------------------------------------------
 
@@ -181,7 +181,7 @@ class EventBatch:
 
     version: str
     events: tuple[Event, ...]
-    raw: Mapping[str, Any] = MappingProxyType({})
+    raw: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
 
     def __iter__(self) -> Iterator[Event]:
         return iter(self.events)
