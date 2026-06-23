@@ -279,6 +279,46 @@ def test_429_exhausts_retries(make_client, sleeps: list[float]) -> None:  # type
     assert len(sleeps) == 2  # initial attempt + 2 retries
 
 
+def _retry_after_once(retry_after: str):  # type: ignore[no-untyped-def]
+    """A handler that returns a 429 with the given Retry-After, then succeeds."""
+
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return json_response({"Code": 2}, status=429, headers={"Retry-After": retry_after})
+        return json_response({"count": 1})
+
+    return handler
+
+
+def test_retry_after_accepts_fractional_seconds(make_client, sleeps: list[float]) -> None:  # type: ignore[no-untyped-def]
+    count = make_client(_retry_after_once("1.5")).send_message(
+        ["100000000000001"], "t@e.com", "hi"
+    )
+    assert count == 1
+    assert sleeps == [1.5]
+
+
+def test_retry_after_accepts_http_date(make_client, sleeps: list[float]) -> None:  # type: ignore[no-untyped-def]
+    # A far-future HTTP-date hint is honoured but clamped to retry_after_max (60s).
+    count = make_client(_retry_after_once("Wed, 21 Oct 2099 07:28:00 GMT")).send_message(
+        ["100000000000001"], "t@e.com", "hi"
+    )
+    assert count == 1
+    assert sleeps == [60.0]
+
+
+def test_retry_after_garbage_falls_back_to_backoff(make_client, sleeps: list[float]) -> None:  # type: ignore[no-untyped-def]
+    # An unparseable hint must not stall the caller: fall back to bounded backoff.
+    count = make_client(_retry_after_once("soon")).send_message(
+        ["100000000000001"], "t@e.com", "hi"
+    )
+    assert count == 1
+    assert sleeps == [0.5]  # backoff_factor (0.5) * 2**(attempt-1)
+
+
 def test_post_5xx_is_not_retried(make_client, sleeps: list[float]) -> None:  # type: ignore[no-untyped-def]
     calls = {"n": 0}
 

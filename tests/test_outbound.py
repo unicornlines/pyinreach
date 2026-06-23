@@ -144,6 +144,20 @@ def test_raw_is_read_only_and_lossless() -> None:
         event.raw["x"] = 1  # type: ignore[index]
 
 
+def test_caller_supplied_mapping_is_isolated() -> None:
+    # When the caller passes a mapping (not str/bytes), the parsed views must be
+    # defensively copied so later mutation of the original is not observable, and
+    # they must remain read-only.
+    source = {"Version": "2.0", "Events": [{"imei": "1", "messageCode": 3, "x": 1}]}
+    batch = parse_events(source)
+    source["Version"] = "9.9"  # type: ignore[assignment]
+    source["Events"][0]["x"] = 999  # type: ignore[index]
+    assert batch.raw["Version"] == "2.0"
+    assert batch[0].raw["x"] == 1
+    with pytest.raises(TypeError):
+        batch[0].raw["y"] = 2  # type: ignore[index]
+
+
 @pytest.mark.parametrize(
     "payload",
     [

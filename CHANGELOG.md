@@ -15,6 +15,32 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   longer treated as a side-effect-free GET: it is never replayed after an
   ambiguous failure (read timeout or 5xx), closing a double-spend gap. It is
   still retried after a connection error, which proves the command was not sent.
+- A server `Retry-After` header in the RFC 7231 *HTTP-date* form (e.g.
+  `Retry-After: Wed, 21 Oct 2025 07:28:00 GMT`) is now honoured instead of being
+  silently ignored in favour of exponential back-off; a fractional second count
+  is also accepted. Non-finite or unparseable hints still fall back to the
+  client's own bounded back-off.
+
+### Changed
+- `parse_events` no longer makes a redundant defensive copy of a payload it
+  decoded itself from `str`/`bytes` (it wraps the privately-owned tree in
+  read-only views directly), trimming container overhead for large payloads. A
+  caller-supplied mapping is still copied so later external mutation cannot be
+  observed through the parsed views.
+
+### Security
+- `parse_dotnet_date` now bounds the digit count it will convert to an `int`,
+  mirroring the cap already applied in outbound parsing, so a hostile
+  `/Date(99999...)/` string cannot trigger a super-linear `int()` conversion on
+  Python < 3.11 (which has no built-in cap).
+- `MediaMessage` now enforces a generous local size ceiling (`MEDIA_MAX_BYTES`,
+  16 MiB) on the decoded media payload and rejects an oversized blob *before*
+  decoding it, so an accidental or hostile multi-gigabyte payload fails fast
+  without being materialised. This is a client-side guard, not Garmin's
+  authoritative media limit.
+- `build_data_url` now validates the MIME type against an RFC 6838
+  `type/subtype` token (anchored with `\A`/`\Z` so a trailing newline is
+  rejected) rather than only checking for a `/`.
 
 ### Security
 - `parse_events` now raises `ParseError` (instead of leaking an uncaught

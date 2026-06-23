@@ -47,6 +47,13 @@ def test_parse_dotnet_date_rejects_garbage() -> None:
         parse_dotnet_date("2024-01-01")
 
 
+def test_parse_dotnet_date_rejects_overlong_digit_run() -> None:
+    # A multi-thousand-digit millisecond count must be rejected by the digit cap
+    # rather than fed to a super-linear int() conversion.
+    with pytest.raises(ValueError):
+        parse_dotnet_date("/Date(" + "9" * 5000 + ")/")
+
+
 def test_iso8601_serialisation_has_millis_and_z() -> None:
     dt = datetime(2024, 4, 7, 21, 28, 24, 968000, tzinfo=timezone.utc)
     assert to_iso8601(dt) == "2024-04-07T21:28:24.968Z"
