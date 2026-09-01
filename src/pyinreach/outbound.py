@@ -210,7 +210,7 @@ def parse_events(
             ``{"Version", "Events": [...]}`` structure.
     """
 
-    document = _load(data, max_bytes)
+    document, caller_supplied = _load(data, max_bytes)
     if not isinstance(document, Mapping):
         raise ParseError(f"payload must be a JSON object, got {type(document).__name__}")
     if "Version" not in document:
@@ -219,11 +219,16 @@ def parse_events(
     if not isinstance(raw_events, Sequence) or isinstance(raw_events, (str, bytes)):
         raise ParseError("payload 'Events' must be a JSON array")
 
-    events = tuple(_parse_event(item, index) for index, item in enumerate(raw_events))
+    # A document we decoded ourselves from str/bytes is privately owned, so its
+    # mappings can be wrapped in read-only views directly. Only a caller-supplied
+    # mapping must be defensively copied (it could be mutated after we return).
+    events = tuple(
+        _parse_event(item, index, copy=caller_supplied) for index, item in enumerate(raw_events)
+    )
     return EventBatch(
         version=str(document["Version"]),
         events=events,
-        raw=MappingProxyType(dict(document)),
+        raw=_freeze(document, copy=caller_supplied),
     )
 
 
@@ -232,9 +237,31 @@ def parse_events(
 # ---------------------------------------------------------------------------
 
 
-def _load(data: str | bytes | bytearray | Mapping[str, Any], max_bytes: int | None) -> Any:
+def _freeze(mapping: Mapping[str, Any], *, copy: bool) -> Mapping[str, Any]:
+    """Wrap *mapping* in a read-only view, copying it first only when needed.
+
+    A privately-owned ``dict`` can be wrapped directly; a caller-supplied (or
+    non-``dict``) mapping is copied so later external mutation cannot be observed
+    through the returned view.
+    """
+
+    if copy or not isinstance(mapping, dict):
+        return MappingProxyType(dict(mapping))
+    return MappingProxyType(mapping)
+
+
+def _load(
+    data: str | bytes | bytearray | Mapping[str, Any], max_bytes: int | None
+) -> tuple[Any, bool]:
+    """Return ``(document, caller_supplied)``.
+
+    ``caller_supplied`` is ``True`` when *data* was already a mapping (so the
+    caller still holds a reference to it); ``False`` when we decoded it from
+    str/bytes and therefore own the resulting tree outright.
+    """
+
     if isinstance(data, Mapping):
-        return data
+        return data, True
     if isinstance(data, (bytes, bytearray)):
         if max_bytes is not None and len(data) > max_bytes:
             raise ParseError(f"payload exceeds {max_bytes} bytes")
@@ -246,7 +273,7 @@ def _load(data: str | bytes | bytearray | Mapping[str, Any], max_bytes: int | No
     else:
         raise ParseError(f"data must be str, bytes or a mapping, got {type(data).__name__}")
     try:
-        return json.loads(text)
+        return json.loads(text), False
     except (ValueError, UnicodeDecodeError) as exc:
         raise ParseError(f"payload is not valid JSON: {exc}") from exc
     except RecursionError:
@@ -256,7 +283,7 @@ def _load(data: str | bytes | bytearray | Mapping[str, Any], max_bytes: int | No
         raise ParseError("payload nesting is too deep") from None
 
 
-def _parse_event(item: Any, index: int) -> Event:
+def _parse_event(item: Any, index: int, *, copy: bool) -> Event:
     if not isinstance(item, Mapping):
         raise ParseError(f"Events[{index}] must be a JSON object, got {type(item).__name__}")
 
@@ -286,7 +313,7 @@ def _parse_event(item: Any, index: int) -> Event:
         media_id=_opt_str(item.get("mediaId")),
         media_type=_opt_str(item.get("mediaType")),
         transcription=_opt_str(item.get("transcription")),
-        raw=MappingProxyType(dict(item)),
+        raw=_freeze(item, copy=copy),
     )
 
 

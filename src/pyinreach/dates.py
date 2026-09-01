@@ -31,6 +31,12 @@ __all__ = [
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 _ONE_MS = timedelta(milliseconds=1)
 
+#: Cap on the digit count accepted when converting a captured millisecond count
+#: to an ``int``. A legitimate epoch-ms value is ~13 digits; the bound mirrors
+#: CPython's own int<->str limit so a hostile ``/Date(99999...)/`` string cannot
+#: trigger a super-linear conversion on Python < 3.11 (which has no built-in cap).
+_MAX_INT_DIGITS = 4300
+
 # /Date(<signed-ms>[<+|-><HHMM offset>])/  -- the optional offset is a display
 # hint only; the millisecond count is already UTC, so we ignore it.
 _DOTNET_RE = re.compile(r"^/Date\((-?\d+)(?:[+-]\d{4})?\)/$")
@@ -74,6 +80,9 @@ def parse_dotnet_date(value: str) -> datetime:
 
     match = _DOTNET_RE.match(value.replace("\\", "").strip())
     if match is None:
+        raise ValueError(f"not a Microsoft JSON date: {value!r}")
+    digits = match.group(1).lstrip("-")
+    if len(digits) > _MAX_INT_DIGITS:
         raise ValueError(f"not a Microsoft JSON date: {value!r}")
     return from_epoch_ms(int(match.group(1)))
 

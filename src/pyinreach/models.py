@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
@@ -22,6 +23,7 @@ from .dates import to_dotnet_date, to_iso8601
 from .exceptions import ValidationError
 
 __all__ = [
+    "MEDIA_MAX_BYTES",
     "BinaryMessage",
     "Coordinate",
     "MediaMessage",
@@ -30,6 +32,22 @@ __all__ = [
     "TrackingDevice",
     "build_data_url",
 ]
+
+#: Generous local sanity ceiling on the *decoded* size of a media payload, used
+#: to reject an accidental huge blob before it is encoded and transmitted. This
+#: is a client-side guard, not Garmin's authoritative media limit (which is
+#: undocumented here and far smaller over satellite); it only catches gross
+#: misuse. Matches the outbound parser's default payload ceiling for symmetry.
+MEDIA_MAX_BYTES = 16 * 1024 * 1024
+
+#: Maximum Base64 length corresponding to ``MEDIA_MAX_BYTES`` decoded bytes
+#: (Base64 encodes 3 bytes as 4 characters). Checking the encoded length lets us
+#: reject an oversized payload *before* decoding it.
+_MEDIA_B64_MAX_LEN = 4 * ((MEDIA_MAX_BYTES + 2) // 3)
+
+#: An RFC 6838 ``type/subtype`` token (no parameters), used to validate a MIME
+#: type before it is placed in a ``data:`` URL.
+_MIME_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*\Z")
 
 
 def _num_to_str(value: float) -> str:
@@ -282,7 +300,7 @@ def build_data_url(data: bytes, mime_type: str) -> str:
             code=ErrorCode.INVALID_PAYLOAD,
             field="media",
         )
-    if not isinstance(mime_type, str) or "/" not in mime_type:
+    if not isinstance(mime_type, str) or not _MIME_RE.match(mime_type):
         raise ValidationError(
             f"mime_type must look like 'type/subtype', got {mime_type!r}",
             code=ErrorCode.INVALID_PAYLOAD,
@@ -300,6 +318,14 @@ def _validate_data_url(media: object) -> None:
             field="media",
         )
     b64 = media.split(";base64,", 1)[1]
+    # Size-gate on the encoded length before decoding, so a hostile or accidental
+    # multi-gigabyte payload is rejected without first materialising its bytes.
+    if len(b64) > _MEDIA_B64_MAX_LEN:
+        raise ValidationError(
+            f"media payload exceeds the {MEDIA_MAX_BYTES}-byte limit",
+            code=ErrorCode.INVALID_PAYLOAD,
+            field="media",
+        )
     try:
         base64.b64decode(b64, validate=True)
     except (binascii.Error, ValueError):

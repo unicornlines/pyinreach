@@ -113,7 +113,10 @@ memory.
 All inbound request data is validated locally *before* transmission, mirroring
 the server's documented rules (altitude, speed, course, interval, lat/long,
 message length incl. reference-point label budget, timestamp window, sender
-format, Base64 payload size, IMEI shape, binary/location-type enums). This:
+format, Base64 payload size, IMEI shape, binary/location-type enums). A media
+payload is additionally bounded by a generous local sanity ceiling
+(`MEDIA_MAX_BYTES`) and rejected before it is decoded, so an oversized blob
+fails fast without being materialised. This:
 
 - prevents wasted, costly satellite round-trips on requests the server would
   reject anyway;

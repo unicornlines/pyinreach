@@ -17,9 +17,11 @@ retries that never silently re-send a money-spending command), *deterministic*
 
 from __future__ import annotations
 
+import math
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from datetime import date, datetime
+from datetime import date, datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import httpx
@@ -335,10 +337,9 @@ class InboundClient:
     def _retry_after(self, response: httpx.Response, attempt: int) -> float:
         header = response.headers.get("Retry-After")
         if header is not None:
-            try:
-                return min(max(float(int(header)), 0.0), self._retry_after_max)
-            except ValueError:
-                pass
+            delay = _parse_retry_after(header)
+            if delay is not None:
+                return min(max(delay, 0.0), self._retry_after_max)
         return self._backoff(attempt)
 
     def _request(
@@ -439,6 +440,31 @@ class InboundClient:
         return value
 
 
+def _parse_retry_after(header: str) -> float | None:
+    """Parse a ``Retry-After`` value to a number of seconds, or ``None``.
+
+    Per RFC 7231 the value is either ``delay-seconds`` (a non-negative number)
+    or an ``HTTP-date``. Both forms are supported; a fractional second count is
+    tolerated too. Non-finite or unparseable values yield ``None`` so the caller
+    falls back to its own bounded back-off rather than trusting a hostile hint.
+    """
+
+    text = header.strip()
+    try:
+        seconds = float(text)
+    except ValueError:
+        try:
+            target = parsedate_to_datetime(text)
+        except (TypeError, ValueError):
+            return None
+        if target is None:
+            return None
+        if target.tzinfo is None:
+            target = target.replace(tzinfo=timezone.utc)
+        seconds = (target - datetime.now(timezone.utc)).total_seconds()
+    return seconds if math.isfinite(seconds) else None
+
+
 def _get(data: Any, key: str) -> Any:
     if isinstance(data, Mapping):
         return data.get(key)
@@ -456,6 +482,4 @@ def _as_date_string(value: date | datetime | str) -> str:
 
 
 def _utcnow() -> datetime:
-    from datetime import timezone
-
     return datetime.now(timezone.utc)

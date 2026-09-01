@@ -116,6 +116,29 @@ def test_build_data_url() -> None:
     assert url == "data:image/png;base64," + base64.b64encode(b"hi").decode()
 
 
+@pytest.mark.parametrize(
+    "bad_mime",
+    ["png", "image/", "/png", "image png", "image/png\n", "image/png; charset=utf-8", ""],
+)
+def test_build_data_url_rejects_malformed_mime(bad_mime: str) -> None:
+    with pytest.raises(ValidationError):
+        build_data_url(b"x", bad_mime)
+
+
+def test_media_message_rejects_oversized_payload() -> None:
+    from pyinreach.models import _MEDIA_B64_MAX_LEN
+
+    # Length-gated before decoding, so the content need not be real Base64.
+    oversized = "A" * (_MEDIA_B64_MAX_LEN + 4)
+    with pytest.raises(ValidationError):
+        MediaMessage(
+            recipients=["100000000000001"],
+            sender="m@g.com",
+            text="x",
+            media="data:image/png;base64," + oversized,
+        )
+
+
 def test_tracking_device_serialisers() -> None:
     dev = TrackingDevice(imei="100000000000001", tracking=True, interval=30)
     assert dev.to_tracking_dict() == {"Imei": "100000000000001", "Tracking": True, "Interval": 30}
